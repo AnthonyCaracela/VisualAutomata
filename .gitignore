@@ -1,0 +1,35 @@
+# CMake
+/build/
+/cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+CTestTestfile.cmake
+Makefile
+
+# Compiled artifacts
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dll
+*.dylib
+*.exe
+*.pdb
+*.ilk
+
+# Qt Creator / Qt
+*.user
+*.user.*
+*.qmake.stash
+.qmake.cache
+
+# Visual Studio Code
+.vscode/
+
+# IDE and OS files
+.idea/
+.DS_Store
+Thumbs.db
