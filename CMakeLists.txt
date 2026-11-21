@@ -28,6 +28,11 @@ add_library(va_core STATIC
     src/model/DFA.cpp
     src/model/NFA.cpp
     src/controller/AutomatonFactory.cpp
+    src/controller/AutomatonFactory.h
+    src/controller/EditorController.cpp
+    src/controller/EditorController.h
+    src/controller/SimulationController.cpp
+    src/controller/SimulationController.h
     src/simulation/DFAStrategy.cpp
     src/simulation/NFAStrategy.cpp
     src/simulation/ParallelTester.cpp
