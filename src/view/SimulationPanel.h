@@ -1,6 +1,7 @@
 #pragma once
 #include <QWidget>
 #include <QLineEdit>
+#include <QPlainTextEdit>
 #include <QPushButton>
 #include <QTextEdit>
 #include <QLabel>
@@ -16,6 +17,7 @@ class SimulationPanel : public QWidget {
 public:
     explicit SimulationPanel(QWidget* parent = nullptr);
     void reset();
+    void resetTrace();
 
 signals:
     void runRequested(QString input);
@@ -35,6 +37,7 @@ private:
     QPushButton* _runAllBtn;
     QLabel* _statusLabel;
     QTextEdit* _logOutput;
+    QPlainTextEdit* _batchResultsOutput;
 };
 
 } // namespace fa::view

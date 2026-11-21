@@ -5,14 +5,6 @@
 #include "StateItem.h"
 #include "TransitionItem.h"
 
-#include "../adapters/IAutomatonAdapter.h"
-#include "../adapters/JffAdapter.h"
-#include "../adapters/JsonAdapter.h"
-#include "../controller/AutomatonFactory.h"
-#include "../simulation/DFAStrategy.h"
-#include "../simulation/NFAStrategy.h"
-#include "../simulation/ParallelTester.h"
-
 #include <QAction>
 #include <QActionGroup>
 #include <QCloseEvent>
@@ -25,11 +17,12 @@
 #include <QPainter>
 #include <QSplitter>
 #include <QStatusBar>
+#include <QToolButton>
 #include <QToolBar>
 #include <QMenuBar>
 
 #include <algorithm>
-#include <exception>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -37,6 +30,8 @@ namespace fa::view {
 
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent),
+      m_editorController(new fa::ctrl::EditorController(this)),
+      m_simulationController(new fa::ctrl::SimulationController(nullptr, this)),
       m_scene(new AutomatonScene(this)) {
     setWindowTitle(QStringLiteral("VisualAutomata"));
     resize(1200, 760);
@@ -45,6 +40,7 @@ MainWindow::MainWindow(QWidget* parent)
     m_graphicsView = new QGraphicsView(m_scene, splitter);
     m_graphicsView->setRenderHint(QPainter::Antialiasing);
     m_graphicsView->setDragMode(QGraphicsView::RubberBandDrag);
+    m_graphicsView->setViewportUpdateMode(QGraphicsView::FullViewportUpdate);
     m_graphicsView->setFocusPolicy(Qt::StrongFocus);
     m_simulationPanel = new SimulationPanel(splitter);
     splitter->addWidget(m_graphicsView);
@@ -52,6 +48,44 @@ MainWindow::MainWindow(QWidget* parent)
     splitter->setStretchFactor(0, 3);
     splitter->setStretchFactor(1, 2);
     setCentralWidget(splitter);
+
+    connect(m_editorController, &fa::ctrl::EditorController::automatonChanged,
+            this, &MainWindow::refreshScene);
+    connect(m_editorController, &fa::ctrl::EditorController::stateMovedOnly,
+            this, &MainWindow::resetSimulation);
+    connect(m_editorController, &fa::ctrl::EditorController::modified,
+            this, &MainWindow::markDirty);
+    connect(m_editorController, &fa::ctrl::EditorController::errorOccurred, this,
+            [this](const QString& title, const QString& message) {
+                QMessageBox::critical(this, title, message);
+            });
+    connect(m_editorController, &fa::ctrl::EditorController::statusMessage, this,
+            [this](const QString& message, int timeoutMs) {
+                statusBar()->showMessage(message, timeoutMs);
+            });
+
+    connect(m_simulationController, &fa::ctrl::SimulationController::stepReady,
+            m_simulationPanel, &SimulationPanel::showStep);
+    connect(m_simulationController, &fa::ctrl::SimulationController::resultReady,
+            m_simulationPanel, &SimulationPanel::showResult);
+    connect(m_simulationController, &fa::ctrl::SimulationController::batchResultsReady,
+            m_simulationPanel, &SimulationPanel::showBatchResults);
+    connect(m_simulationController,
+            &fa::ctrl::SimulationController::highlightStatesRequested,
+            m_scene, &AutomatonScene::highlightStates);
+    connect(m_simulationController,
+            &fa::ctrl::SimulationController::clearHighlightRequested,
+            m_scene, &AutomatonScene::clearHighlight);
+    connect(m_simulationController,
+            &fa::ctrl::SimulationController::resetPanelRequested,
+            m_simulationPanel, &SimulationPanel::reset);
+    connect(m_simulationController,
+            &fa::ctrl::SimulationController::resetTraceRequested,
+            m_simulationPanel, &SimulationPanel::resetTrace);
+    connect(m_simulationController, &fa::ctrl::SimulationController::errorOccurred, this,
+            [this](const QString& title, const QString& message) {
+                QMessageBox::critical(this, title, message);
+            });
 
     auto* fileMenu = menuBar()->addMenu(QStringLiteral("&Archivo"));
     auto* newDfa = fileMenu->addAction(QStringLiteral("Nuevo AFD"));
@@ -97,13 +131,11 @@ MainWindow::MainWindow(QWidget* parent)
     });
 
     auto* editToolbar = addToolBar(QStringLiteral("Edición"));
-    editToolbar->setStyleSheet(
-        QStringLiteral("QToolButton:checked { color: white; background-color: #455A64; }"));
     auto* modeGroup = new QActionGroup(this);
     modeGroup->setExclusive(true);
     const auto addModeAction = [this, editToolbar, modeGroup](
                                    const QString& text, AutomatonScene::Mode mode,
-                                   bool checked = false) {
+                                   bool checked = false) -> QAction* {
         auto* action = editToolbar->addAction(text);
         action->setCheckable(true);
         action->setChecked(checked);
@@ -111,16 +143,53 @@ MainWindow::MainWindow(QWidget* parent)
         connect(action, &QAction::triggered, this, [this, mode]() {
             m_scene->setMode(mode);
         });
+        return action;
     };
-    addModeAction(QStringLiteral("Seleccionar"), AutomatonScene::Mode::Select, true);
-    addModeAction(QStringLiteral("Agregar estado"), AutomatonScene::Mode::AddState);
-    addModeAction(QStringLiteral("Agregar transición"), AutomatonScene::Mode::AddTransition);
+    const auto styleAction = [editToolbar](
+                                 QAction* action, const QString& background,
+                                 const QString& foreground, const QString& border,
+                                 const QString& pressed) {
+        if (auto* button = qobject_cast<QToolButton*>(editToolbar->widgetForAction(action))) {
+            button->setMinimumHeight(28);
+            button->setStyleSheet(
+                QStringLiteral(
+                    "QToolButton { background:%1; color:%2; border:1px solid %3;"
+                    " border-radius:4px; padding:4px 7px; font-weight:600; }"
+                    "QToolButton:hover { border:1px solid #FFFFFF; }"
+                    "QToolButton:pressed, QToolButton:checked { background:%4; color:%2; }")
+                    .arg(background, foreground, border, pressed));
+        }
+    };
+    auto* selectMode =
+        addModeAction(QStringLiteral("Seleccionar"), AutomatonScene::Mode::Select, true);
+    auto* addStateMode =
+        addModeAction(QStringLiteral("Agregar estado"), AutomatonScene::Mode::AddState);
+    auto* addTransitionMode =
+        addModeAction(QStringLiteral("Agregar transición"), AutomatonScene::Mode::AddTransition);
+    styleAction(selectMode, QStringLiteral("#455A64"),
+                QStringLiteral("#FFFFFF"), QStringLiteral("#263238"),
+                QStringLiteral("#263238"));
+    styleAction(addStateMode, QStringLiteral("#1565C0"),
+                QStringLiteral("#FFFFFF"), QStringLiteral("#0D47A1"),
+                QStringLiteral("#0D47A1"));
+    styleAction(addTransitionMode, QStringLiteral("#1565C0"),
+                QStringLiteral("#FFFFFF"), QStringLiteral("#0D47A1"),
+                QStringLiteral("#0D47A1"));
     editToolbar->addSeparator();
     auto* setInitial = editToolbar->addAction(QStringLiteral("Marcar inicial"));
     auto* toggleFinal = editToolbar->addAction(QStringLiteral("Alternar final"));
     auto* renameState = editToolbar->addAction(QStringLiteral("Renombrar estado"));
     auto* deleteState = editToolbar->addAction(QStringLiteral("Eliminar estado"));
     auto* deleteTransition = editToolbar->addAction(QStringLiteral("Eliminar transición"));
+    auto* deleteSelection = editToolbar->addAction(QStringLiteral("Eliminar selección"));
+    for (QAction* action : {setInitial, toggleFinal, renameState}) {
+        styleAction(action, QStringLiteral("#F9A825"), QStringLiteral("#212121"),
+                    QStringLiteral("#F57F17"), QStringLiteral("#F57F17"));
+    }
+    for (QAction* action : {deleteState, deleteTransition, deleteSelection}) {
+        styleAction(action, QStringLiteral("#C62828"), QStringLiteral("#FFFFFF"),
+                    QStringLiteral("#B71C1C"), QStringLiteral("#B71C1C"));
+    }
 
     connect(setInitial, &QAction::triggered, this, [this]() {
         const auto id = selectedStateId();
@@ -128,14 +197,7 @@ MainWindow::MainWindow(QWidget* parent)
             statusBar()->showMessage(QStringLiteral("Selecciona un estado primero."), 3000);
             return;
         }
-        try {
-            m_automaton->setInitial(*id);
-            markDirty();
-            refreshScene();
-        } catch (const std::exception& exception) {
-            QMessageBox::critical(this, QStringLiteral("No se pudo actualizar el estado"),
-                                  QString::fromStdString(exception.what()));
-        }
+        m_editorController->setInitial(*id);
     });
     connect(toggleFinal, &QAction::triggered, this, [this]() {
         const auto id = selectedStateId();
@@ -143,20 +205,14 @@ MainWindow::MainWindow(QWidget* parent)
             statusBar()->showMessage(QStringLiteral("Selecciona un estado primero."), 3000);
             return;
         }
+        const auto& states = m_editorController->automaton().states();
         const auto state = std::find_if(
-            m_automaton->states().begin(), m_automaton->states().end(),
+            states.begin(), states.end(),
             [id](const fa::model::State& candidate) { return candidate.id == *id; });
-        if (state == m_automaton->states().end()) {
+        if (state == states.end()) {
             return;
         }
-        try {
-            m_automaton->setFinal(*id, !state->final);
-            markDirty();
-            refreshScene();
-        } catch (const std::exception& exception) {
-            QMessageBox::critical(this, QStringLiteral("No se pudo actualizar el estado"),
-                                  QString::fromStdString(exception.what()));
-        }
+        m_editorController->setFinal(*id, !state->final);
     });
     connect(renameState, &QAction::triggered, this, [this]() {
         const auto id = selectedStateId();
@@ -164,10 +220,11 @@ MainWindow::MainWindow(QWidget* parent)
             statusBar()->showMessage(QStringLiteral("Selecciona un estado primero."), 3000);
             return;
         }
+        const auto& states = m_editorController->automaton().states();
         const auto state = std::find_if(
-            m_automaton->states().begin(), m_automaton->states().end(),
+            states.begin(), states.end(),
             [id](const fa::model::State& candidate) { return candidate.id == *id; });
-        if (state == m_automaton->states().end()) {
+        if (state == states.end()) {
             return;
         }
         bool accepted = false;
@@ -177,14 +234,7 @@ MainWindow::MainWindow(QWidget* parent)
         if (!accepted) {
             return;
         }
-        try {
-            m_automaton->setStateName(*id, name.toStdString());
-            markDirty();
-            refreshScene();
-        } catch (const std::exception& exception) {
-            QMessageBox::critical(this, QStringLiteral("No se pudo renombrar el estado"),
-                                  QString::fromStdString(exception.what()));
-        }
+        m_editorController->setStateName(*id, name.toStdString());
     });
     connect(deleteState, &QAction::triggered, this, [this]() {
         const auto id = selectedStateId();
@@ -192,14 +242,7 @@ MainWindow::MainWindow(QWidget* parent)
             statusBar()->showMessage(QStringLiteral("Selecciona un estado primero."), 3000);
             return;
         }
-        try {
-            m_automaton->removeState(*id);
-            markDirty();
-            refreshScene();
-        } catch (const std::exception& exception) {
-            QMessageBox::critical(this, QStringLiteral("No se pudo eliminar el estado"),
-                                  QString::fromStdString(exception.what()));
-        }
+        m_editorController->onItemDeleted(*id);
     });
     connect(deleteTransition, &QAction::triggered, this, [this]() {
         const auto transition = selectedTransition();
@@ -207,79 +250,42 @@ MainWindow::MainWindow(QWidget* parent)
             statusBar()->showMessage(QStringLiteral("Selecciona una transición primero."), 3000);
             return;
         }
-        try {
-            m_automaton->removeTransition(*transition);
-            markDirty();
-            refreshScene();
-        } catch (const std::exception& exception) {
-            QMessageBox::critical(this, QStringLiteral("No se pudo eliminar la transición"),
-                                  QString::fromStdString(exception.what()));
-        }
+        m_editorController->onTransitionDeleted(transition->from, transition->to,
+                                                transition->symbol);
     });
+    connect(deleteSelection, &QAction::triggered,
+            this, &MainWindow::deleteSelectedItems);
 
-    connect(m_scene, &AutomatonScene::stateAdded, this, [this](double x, double y) {
-        try {
-            const int id = m_automaton->nextStateId();
-            const bool initial = !m_automaton->initialStateId().has_value();
-            m_automaton->addState(
-                {id, "q" + std::to_string(id), initial, false, x, y});
-            markDirty();
-            refreshScene();
-        } catch (const std::exception& exception) {
-            QMessageBox::critical(this, QStringLiteral("No se pudo agregar el estado"),
-                                  QString::fromStdString(exception.what()));
-        }
-    });
+    connect(m_scene, &AutomatonScene::stateAdded, this,
+            [this](double x, double y) { m_editorController->onStateAdded(x, y); });
     connect(m_scene, &AutomatonScene::stateMoved, this, [this](int id, double x, double y) {
-        try {
-            m_automaton->moveState(id, x, y);
-            markDirty();
-            resetSimulation();
-        } catch (const std::exception& exception) {
-            QMessageBox::critical(this, QStringLiteral("No se pudo mover el estado"),
-                                  QString::fromStdString(exception.what()));
-            refreshScene();
-        }
+        m_editorController->onStateMoved(id, x, y);
     });
     connect(m_scene, &AutomatonScene::transitionAdded, this,
             [this](int from, int to, char symbol) {
-                try {
-                    m_automaton->addTransition({from, to, symbol});
-                    markDirty();
-                    refreshScene();
-                } catch (const std::exception& exception) {
-                    QMessageBox::critical(this, QStringLiteral("No se pudo agregar la transición"),
-                                          QString::fromStdString(exception.what()));
-                }
+                m_editorController->onTransitionAdded(from, to, symbol);
             });
-    connect(m_scene, &AutomatonScene::itemDeleted, this, [this](int id) {
-        try {
-            m_automaton->removeState(id);
-            markDirty();
-            refreshScene();
-        } catch (const std::exception& exception) {
-            QMessageBox::critical(this, QStringLiteral("No se pudo eliminar el estado"),
-                                  QString::fromStdString(exception.what()));
-        }
-    });
-    connect(m_scene, &AutomatonScene::transitionDeleted, this,
-            [this](int from, int to, char symbol) {
-                try {
-                    m_automaton->removeTransition({from, to, symbol});
-                    markDirty();
-                    refreshScene();
-                } catch (const std::exception& exception) {
-                    QMessageBox::critical(this, QStringLiteral("No se pudo eliminar la transición"),
-                                          QString::fromStdString(exception.what()));
-                }
-            });
+    connect(m_scene, &AutomatonScene::deleteSelectionRequested,
+            this, &MainWindow::deleteSelectedItems);
 
     connect(m_simulationPanel, &SimulationPanel::runRequested, this,
-            [this](const QString& input) { runInput(input); });
+            [this](const QString& input) {
+                m_simulationController->run(input.toUtf8().toStdString());
+            });
     connect(m_simulationPanel, &SimulationPanel::stepRequested, this,
-            [this](const QString& input) { stepInput(input); });
+            [this](const QString& input) {
+                m_simulationController->setPendingInput(input.toUtf8().toStdString());
+                m_simulationController->nextStep();
+            });
     connect(m_simulationPanel, &SimulationPanel::runAllRequested, this,
-            [this](const QStringList& inputs) { runBatch(inputs); });
+            [this](const QStringList& inputs) {
+                std::vector<std::string> strings;
+                strings.reserve(static_cast<std::size_t>(inputs.size()));
+                for (const auto& input : inputs) {
+                    strings.push_back(input.toUtf8().toStdString());
+                }
+                m_simulationController->runAll(strings);
+            });
 
     createAutomaton(fa::ctrl::AutomatonType::DFA);
 }
@@ -288,61 +294,37 @@ void MainWindow::createAutomaton(fa::ctrl::AutomatonType type) {
     if (!confirmDiscardChanges()) {
         return;
     }
-    m_automaton = fa::ctrl::AutomatonFactory::create(type);
+    m_editorController->newAutomaton(type);
     m_filePath.clear();
     m_fileIsJff = false;
     markClean();
-    refreshScene();
-    statusBar()->showMessage(
-        QStringLiteral("Nuevo autómata: ") + QString::fromStdString(m_automaton->typeName()));
 }
 
 void MainWindow::loadAutomaton(const QString& path) {
     if (!confirmDiscardChanges()) {
         return;
     }
-    try {
-        std::unique_ptr<fa::adapters::IAutomatonAdapter> adapter;
-        const bool jflap = path.endsWith(QStringLiteral(".jff"), Qt::CaseInsensitive);
-        if (jflap) {
-            adapter = std::make_unique<fa::adapters::JffAdapter>();
-        } else {
-            adapter = std::make_unique<fa::adapters::JsonAdapter>();
-        }
-        m_automaton = adapter->importFrom(path.toStdString());
+    if (m_editorController->loadFromFile(path.toStdString())) {
         m_filePath = path;
-        m_fileIsJff = jflap;
+        m_fileIsJff = path.endsWith(QStringLiteral(".jff"), Qt::CaseInsensitive);
         markClean();
-        refreshScene();
-        statusBar()->showMessage(QStringLiteral("Autómata cargado."), 3000);
-    } catch (const std::exception& exception) {
-        QMessageBox::critical(this, QStringLiteral("No se pudo abrir el autómata"),
-                              QString::fromStdString(exception.what()));
     }
 }
 
 bool MainWindow::saveAutomaton(const QString& path, bool jflap) {
-    try {
-        QString outputPath = path;
-        const QString extension = jflap ? QStringLiteral(".jff") : QStringLiteral(".json");
-        if (!outputPath.endsWith(extension, Qt::CaseInsensitive)) {
-            outputPath += extension;
-        }
-        if (jflap) {
-            fa::adapters::JffAdapter().exportTo(*m_automaton, outputPath.toStdString());
-        } else {
-            fa::adapters::JsonAdapter().exportTo(*m_automaton, outputPath.toStdString());
-        }
-        m_filePath = outputPath;
-        m_fileIsJff = jflap;
-        markClean();
-        statusBar()->showMessage(QStringLiteral("Autómata guardado."), 3000);
-        return true;
-    } catch (const std::exception& exception) {
-        QMessageBox::critical(this, QStringLiteral("No se pudo exportar el autómata"),
-                              QString::fromStdString(exception.what()));
+    QString outputPath = path;
+    const QString extension = jflap ? QStringLiteral(".jff") : QStringLiteral(".json");
+    if (!outputPath.endsWith(extension, Qt::CaseInsensitive)) {
+        outputPath += extension;
+    }
+    if (!m_editorController->saveToFile(outputPath.toStdString(), jflap)) {
         return false;
     }
+    m_filePath = outputPath;
+    m_fileIsJff = jflap;
+    markClean();
+    statusBar()->showMessage(QStringLiteral("Autómata guardado."), 3000);
+    return true;
 }
 
 bool MainWindow::saveCurrent() {
@@ -404,111 +386,61 @@ void MainWindow::closeEvent(QCloseEvent* event) {
 }
 
 void MainWindow::refreshScene() {
-    m_scene->loadAutomaton(*m_automaton);
-    resetSimulation();
+    const auto& automaton = m_editorController->automaton();
+    m_simulationController->setAutomaton(&automaton);
+    m_scene->loadAutomaton(automaton);
 }
 
 void MainWindow::resetSimulation() {
-    m_lastSimulation.reset();
-    m_lastInput.clear();
-    m_nextStep = 0;
-    if (m_scene) {
-        m_scene->clearHighlight();
-    }
-    if (m_simulationPanel) {
-        m_simulationPanel->reset();
-    }
+    m_simulationController->reset();
 }
 
-void MainWindow::showNoStatesError() {
-    fa::sim::SimulationResult result;
-    result.error = "Agrega al menos un estado al lienzo; el primero será inicial.";
-    m_simulationPanel->showResult(result);
-    m_scene->clearHighlight();
-}
-
-void MainWindow::runInput(const QString& input) {
-    if (m_automaton->states().empty()) {
-        showNoStatesError();
-        return;
-    }
-    const std::string text = input.toUtf8().toStdString();
-    m_lastSimulation = m_automaton->typeName() == "DFA"
-        ? fa::sim::DFAStrategy().run(*m_automaton, text)
-        : fa::sim::NFAStrategy().run(*m_automaton, text);
-    m_lastInput = input;
-    m_nextStep = m_lastSimulation->steps.size();
-    m_simulationPanel->showResult(*m_lastSimulation);
-    if (!m_lastSimulation->steps.empty()) {
-        m_scene->highlightStates(m_lastSimulation->steps.back().currentStates);
-    } else {
-        m_scene->clearHighlight();
-    }
-}
-
-void MainWindow::stepInput(const QString& input) {
-    if (m_automaton->states().empty()) {
-        showNoStatesError();
-        return;
-    }
-    if (!m_lastSimulation || input != m_lastInput) {
-        m_simulationPanel->reset();
-        m_scene->clearHighlight();
-        const std::string text = input.toUtf8().toStdString();
-        m_lastSimulation = m_automaton->typeName() == "DFA"
-            ? fa::sim::DFAStrategy().run(*m_automaton, text)
-            : fa::sim::NFAStrategy().run(*m_automaton, text);
-        m_lastInput = input;
-        m_nextStep = 0;
-    }
-
-    if (m_lastSimulation->steps.empty()) {
-        m_simulationPanel->showResult(*m_lastSimulation);
-        m_scene->clearHighlight();
-        return;
-    }
-    if (m_nextStep < m_lastSimulation->steps.size()) {
-        const auto& step = m_lastSimulation->steps[m_nextStep++];
-        m_simulationPanel->showStep(step);
-        m_scene->highlightStates(step.currentStates);
-    }
-    if (m_nextStep == m_lastSimulation->steps.size()) {
-        m_simulationPanel->showResult(*m_lastSimulation);
-    }
-}
-
-void MainWindow::runBatch(const QStringList& inputs) {
-    m_lastSimulation.reset();
-    m_lastInput.clear();
-    m_nextStep = 0;
-    std::vector<std::string> strings;
-    strings.reserve(static_cast<std::size_t>(inputs.size()));
-    for (const auto& input : inputs) {
-        strings.push_back(input.toUtf8().toStdString());
-    }
-    if (m_automaton->states().empty()) {
-        fa::sim::SimulationResult result;
-        result.error = "Agrega al menos un estado al lienzo; el primero será inicial.";
-        m_simulationPanel->showBatchResults(inputs,
-                                            std::vector<fa::sim::SimulationResult>(
-                                                inputs.size(), result));
-        return;
-    }
-    try {
-        std::vector<fa::sim::SimulationResult> results;
-        if (m_automaton->typeName() == "DFA") {
-            results = fa::sim::ParallelTester().testAll(
-                *m_automaton, strings, fa::sim::DFAStrategy());
-        } else {
-            results = fa::sim::ParallelTester().testAll(
-                *m_automaton, strings, fa::sim::NFAStrategy());
+void MainWindow::deleteSelectedItems() {
+    std::vector<int> stateIds;
+    std::vector<fa::model::Transition> transitions;
+    for (QGraphicsItem* item : m_scene->selectedItems()) {
+        if (const auto* state = dynamic_cast<const StateItem*>(item)) {
+            stateIds.push_back(state->id());
+        } else if (const auto* transition = dynamic_cast<const TransitionItem*>(item)) {
+            transitions.push_back(
+                {transition->fromId(), transition->toId(), transition->symbol()});
         }
-        m_simulationPanel->showBatchResults(inputs, results);
-        m_scene->clearHighlight();
-    } catch (const std::exception& exception) {
-        QMessageBox::critical(this, QStringLiteral("Falló la simulación por lotes"),
-                              QString::fromStdString(exception.what()));
     }
+
+    if (stateIds.empty() && transitions.empty()) {
+        statusBar()->showMessage(QStringLiteral("Selecciona uno o más elementos para eliminar."),
+                                 3000);
+        return;
+    }
+
+    const std::set<int> statesToDelete(stateIds.begin(), stateIds.end());
+    std::size_t affectedTransitions = 0;
+    for (const auto& transition : m_editorController->automaton().transitions()) {
+        const bool selected =
+            std::find(transitions.begin(), transitions.end(), transition) != transitions.end();
+        const bool removedWithState =
+            statesToDelete.count(transition.from) != 0 ||
+            statesToDelete.count(transition.to) != 0;
+        if (selected || removedWithState) {
+            ++affectedTransitions;
+        }
+    }
+
+    const std::size_t affectedItems = stateIds.size() + affectedTransitions;
+    if (affectedItems > 1) {
+        const auto choice = QMessageBox::warning(
+            this, QStringLiteral("Eliminar selección"),
+            QStringLiteral("Se eliminarán %1 estado(s) y %2 transición(es), incluidas las "
+                           "conectadas a los estados seleccionados. ¿Continuar?")
+                .arg(stateIds.size())
+                .arg(affectedTransitions),
+            QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
+        if (choice != QMessageBox::Yes) {
+            return;
+        }
+    }
+
+    m_editorController->deleteItems(stateIds, transitions);
 }
 
 std::optional<int> MainWindow::selectedStateId() const {

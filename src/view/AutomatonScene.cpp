@@ -115,17 +115,9 @@ void AutomatonScene::mouseReleaseEvent(QGraphicsSceneMouseEvent* event) {
 
 void AutomatonScene::keyPressEvent(QKeyEvent* event) {
     if (event->key() == Qt::Key_Delete || event->key() == Qt::Key_Backspace) {
-        for (QGraphicsItem* item : selectedItems()) {
-            if (auto* stateItem = dynamic_cast<StateItem*>(item)) {
-                emit itemDeleted(stateItem->id());
-                return;
-            }
-            if (auto* transitionItem = dynamic_cast<TransitionItem*>(item)) {
-                emit transitionDeleted(transitionItem->fromId(), transitionItem->toId(),
-                                      transitionItem->symbol());
-                return;
-            }
-        }
+        emit deleteSelectionRequested();
+        event->accept();
+        return;
     }
     QGraphicsScene::keyPressEvent(event);
 }

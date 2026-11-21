@@ -10,6 +10,7 @@ namespace fa::view {
 SimulationPanel::SimulationPanel(QWidget* parent)
     : QWidget(parent) {
     auto* mainLayout = new QVBoxLayout(this);
+    mainLayout->setSpacing(6);
 
     auto* singleGroup = new QGroupBox("Prueba de Cadena", this);
     auto* singleLayout = new QVBoxLayout(singleGroup);
@@ -19,7 +20,19 @@ SimulationPanel::SimulationPanel(QWidget* parent)
 
     auto* btnRow = new QHBoxLayout();
     _runBtn = new QPushButton("Ejecutar", this);
+    _runBtn->setObjectName(QStringLiteral("runButton"));
+    _runBtn->setStyleSheet(QStringLiteral(
+        "QPushButton { background:#2E7D32; color:white; border:1px solid #1B5E20;"
+        " border-radius:5px; padding:6px; font-weight:600; }"
+        "QPushButton:hover { background:#388E3C; }"
+        "QPushButton:pressed { background:#1B5E20; }"));
     _stepBtn = new QPushButton("Paso a paso", this);
+    _stepBtn->setObjectName(QStringLiteral("stepButton"));
+    _stepBtn->setStyleSheet(QStringLiteral(
+        "QPushButton { background:#1565C0; color:white; border:1px solid #0D47A1;"
+        " border-radius:5px; padding:6px; font-weight:600; }"
+        "QPushButton:hover { background:#1976D2; }"
+        "QPushButton:pressed { background:#0D47A1; }"));
     btnRow->addWidget(_runBtn);
     btnRow->addWidget(_stepBtn);
 
@@ -34,24 +47,43 @@ SimulationPanel::SimulationPanel(QWidget* parent)
     auto* traceGroup = new QGroupBox("Traza de Ejecución", this);
     auto* traceLayout = new QVBoxLayout(traceGroup);
     _logOutput = new QTextEdit(this);
+    _logOutput->setObjectName(QStringLiteral("singleRunTrace"));
     _logOutput->setReadOnly(true);
     _logOutput->setFont(QFont("Consolas", 9));
     traceLayout->addWidget(_logOutput);
-    mainLayout->addWidget(traceGroup);
+    mainLayout->addWidget(traceGroup, 2);
 
     auto* batchGroup = new QGroupBox("Pruebas en Paralelo (una por línea)", this);
     auto* batchLayout = new QVBoxLayout(batchGroup);
     _batchInputEdit = new QTextEdit(this);
     _batchInputEdit->setPlaceholderText("aabb\nab\nbbba\n...");
-    _batchInputEdit->setMaximumHeight(110);
+    _batchInputEdit->setMaximumHeight(78);
 
     _runAllBtn = new QPushButton("Probar Todas en Paralelo", this);
+    _runAllBtn->setObjectName(QStringLiteral("runAllButton"));
+    _runAllBtn->setStyleSheet(QStringLiteral(
+        "QPushButton { background:#6A1B9A; color:white; border:1px solid #4A148C;"
+        " border-radius:5px; padding:6px; font-weight:600; }"
+        "QPushButton:hover { background:#7B1FA2; }"
+        "QPushButton:pressed { background:#4A148C; }"));
     batchLayout->addWidget(_batchInputEdit);
     batchLayout->addWidget(_runAllBtn);
     mainLayout->addWidget(batchGroup);
 
+    auto* batchResultsGroup = new QGroupBox("Resultados en paralelo", this);
+    auto* batchResultsLayout = new QVBoxLayout(batchResultsGroup);
+    _batchResultsOutput = new QPlainTextEdit(this);
+    _batchResultsOutput->setObjectName(QStringLiteral("batchResultsOutput"));
+    _batchResultsOutput->setReadOnly(true);
+    _batchResultsOutput->setFont(QFont("Consolas", 9));
+    _batchResultsOutput->setMinimumHeight(64);
+    _batchResultsOutput->setMaximumHeight(110);
+    batchResultsLayout->addWidget(_batchResultsOutput);
+    mainLayout->addWidget(batchResultsGroup, 1);
+    mainLayout->setStretch(1, 2);
+
     connect(_runBtn, &QPushButton::clicked, this, [this]() {
-        _logOutput->clear();
+        resetTrace();
         emit runRequested(_inputEdit->text());
     });
 
@@ -62,12 +94,17 @@ SimulationPanel::SimulationPanel(QWidget* parent)
     connect(_runAllBtn, &QPushButton::clicked, this, [this]() {
         QString raw = _batchInputEdit->toPlainText();
         QStringList lines = raw.split('\n', Qt::SkipEmptyParts);
-        _logOutput->clear();
+        _batchResultsOutput->clear();
         emit runAllRequested(lines);
     });
 }
 
 void SimulationPanel::reset() {
+    resetTrace();
+    _batchResultsOutput->clear();
+}
+
+void SimulationPanel::resetTrace() {
     _logOutput->clear();
     _statusLabel->setText(QStringLiteral("Estado: Listo"));
     _statusLabel->setStyleSheet(QStringLiteral("font-weight: bold; padding: 4px;"));
@@ -120,23 +157,43 @@ void SimulationPanel::showResult(const fa::sim::SimulationResult& result) {
     }
 }
 
-void SimulationPanel::showBatchResults(const QStringList& inputs, const std::vector<fa::sim::SimulationResult>& results) {
-    _logOutput->clear();
-    _logOutput->append("=== RESULTADOS EN PARALELO ===");
-
+void SimulationPanel::showBatchResults(
+    const QStringList& inputs,
+    const std::vector<fa::sim::SimulationResult>& results) {
+    _batchResultsOutput->clear();
     size_t count = std::min(static_cast<size_t>(inputs.size()), results.size());
-    for (size_t i = 0; i < count; ++i) {
-        QString str = inputs[static_cast<int>(i)];
-        const auto& res = results[i];
-        QString verdict = !res.error.empty()
-            ? QString("ERROR (%1)").arg(QString::fromStdString(res.error))
-            : (res.accepted ? "ACEPTADA" : "RECHAZADA");
-
-        _logOutput->append(QString("\"%1\" -> %2").arg(str, verdict));
+    if (count == 0) {
+        _batchResultsOutput->appendPlainText(QStringLiteral("No hay cadenas para probar."));
+        return;
     }
 
-    _statusLabel->setText(QString("Lote completado (%1 cadenas)").arg(count));
-    _statusLabel->setStyleSheet("font-weight: bold; color: #263238; padding: 4px;");
+    size_t acceptedCount = 0;
+    size_t rejectedCount = 0;
+    size_t errorCount = 0;
+    for (size_t i = 0; i < count; ++i) {
+        const QString input = inputs[static_cast<int>(i)];
+        const auto& res = results[i];
+        if (!res.error.empty()) {
+            ++errorCount;
+            _batchResultsOutput->appendPlainText(
+                QStringLiteral("\"%1\" -> ERROR: %2")
+                    .arg(input, QString::fromStdString(res.error)));
+        } else if (res.accepted) {
+            ++acceptedCount;
+            _batchResultsOutput->appendPlainText(
+                QStringLiteral("\"%1\" -> ACEPTADA").arg(input));
+        } else {
+            ++rejectedCount;
+            _batchResultsOutput->appendPlainText(
+                QStringLiteral("\"%1\" -> RECHAZADA").arg(input));
+        }
+    }
+
+    _batchResultsOutput->appendPlainText(
+        QStringLiteral("Resumen: %1 aceptada(s), %2 rechazada(s), %3 error(es).")
+            .arg(acceptedCount)
+            .arg(rejectedCount)
+            .arg(errorCount));
 }
 
 } // namespace fa::view

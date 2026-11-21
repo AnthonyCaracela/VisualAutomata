@@ -28,6 +28,10 @@ add_library(va_core STATIC
     src/model/DFA.cpp
     src/model/NFA.cpp
     src/controller/AutomatonFactory.cpp
+    src/controller/EditorController.cpp
+    src/controller/EditorController.h
+    src/controller/SimulationController.cpp
+    src/controller/SimulationController.h
     src/simulation/DFAStrategy.cpp
     src/simulation/NFAStrategy.cpp
     src/simulation/ParallelTester.cpp
@@ -77,6 +81,7 @@ add_va_test(test_nfa tests/test_nfa.cpp)
 add_va_test(test_strategies tests/test_strategies.cpp)
 add_va_test(test_adapters tests/test_adapters.cpp)
 add_va_test(test_factory tests/test_factory.cpp)
+add_va_test(test_controllers tests/test_controllers.cpp)
 
 add_executable(test_view tests/test_view.cpp)
 target_link_libraries(test_view PRIVATE va_view ${VA_QT}::Test)

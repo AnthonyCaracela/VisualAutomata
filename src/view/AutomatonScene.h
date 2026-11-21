@@ -25,8 +25,7 @@ signals:
     void stateAdded(double x, double y);
     void stateMoved(int id, double x, double y);
     void transitionAdded(int from, int to, char symbol);
-    void itemDeleted(int id);
-    void transitionDeleted(int from, int to, char symbol);
+    void deleteSelectionRequested();
 
 public slots:
     void highlightStates(const std::set<int>& activeIds);
